@@ -1,351 +1,118 @@
-# TheThreeMusketers
-Repository containing the code for JunctionX Lisbon Hackathon.
+# Forest Guardian: segmenting invasive acacia from satellite imagery
 
-## Final Result: Winners of the competition, we are going to Finland 🥳
+🥇 **1st place overall, JunctionX Lisbon 2025** (also 1st in peer vote, 2nd partners' jury, 3rd organisers' jury) · [Técnico write-up](https://tecnico.ulisboa.pt/pt/noticias/campus-e-comunidade/inteligencia-artificial-financas-e-sociedade-tecnico-recebeu-estreia-da-hackaton-junctionx-em-portugal/)
 
-## Press
-https://tecnico.ulisboa.pt/pt/noticias/campus-e-comunidade/inteligencia-artificial-financas-e-sociedade-tecnico-recebeu-estreia-da-hackaton-junctionx-em-portugal/
+**[▶ Live demo](https://duartepcruz.com/work/invasive-species-mapping/)** (runs in your browser, nothing uploaded) · **[Model](https://huggingface.co/duartepcruz/forest-guardian-yolov8-seg)** · **[Dataset](https://huggingface.co/datasets/duartepcruz/acacia_dataset)** · [Pitch deck (PDF)](docs/Acacia-Classifier-in-Mediterranean-Forests.pdf)
 
----
+| | | | |
+|---|---|---|---|
+| ![Acacia stand on a riverbank, outlined](https://duartepcruz.com/figures/acacia-pred-1.webp) | ![Acacia patch in dense forest, outlined](https://duartepcruz.com/figures/acacia-pred-2.webp) | ![Acacia patch near a village, outlined](https://duartepcruz.com/figures/acacia-pred-3.webp) | ![Terraced hillside, nothing flagged](https://duartepcruz.com/figures/acacia-pred-neg.webp) |
+| acacia ✅ | acacia ✅ | acacia ✅ | negative, nothing flagged ✅ |
 
-# Forest Guardian: Acacia Detection & Mapping
+*Validation tiles the model never saw in training.*
 
-Realtime detection and mapping of invasive Acacia trees in forests using YOLOv8-seg.
+Acacias were introduced to Portugal for timber and dune stabilisation, and they now spread through native forest faster than anyone can survey on foot. This project points foresters at where to look.
 
-## Project Description
+## Results
 
-Forest Guardian is a hackathon project that detects invasive Acacia trees in forest images using a fine-tuned YOLOv8-seg model.
+YOLOv8n-seg, 15 epochs at 640 px, evaluated on the held-out validation split:
 
-Users can upload satellite or drone images through a web interface, and the system returns segmentation masks highlighting Acacia patches, along with confidence scores.
+| Metric | Value |
+|---|---|
+| Box mAP@50 | **0.56** |
+| Mask mAP@50 | 0.24 |
+| Acacia tiles flagged | 22 / 32 (69%) |
+| Negative tiles flagged (false alarms) | **0 / 16** |
 
-The goal is to provide a scalable, fast, and interactive tool for forest monitoring and environmental management.
+The model is deliberately conservative: it would rather miss a stand than send someone into the field for nothing.
 
-## Prerequisites
+**Why masks score much lower than boxes:** the ground truth comes from COS2018 map polygons drawn at landscape scale, not tree crowns. The labels are blobs, so the masks are blobs too. This is a label-quality problem more than a model problem.
 
-Before running the project, ensure you have the following installed:
+### Known failure modes
+- **Misses about a third of stands**, especially acacia in yellow bloom. Most training tiles show trees out of flower. Lowering the confidence threshold to 0.15 recovers them, so the signal is there but weak.
+- **Masks are coarse** because the labels are coarse (see above). Trust the boxes more than the outlines.
+- **One imagery source.** All tiles come from one satellite basemap at a similar zoom. Expect worse results on drone photos, other seasons or other resolutions.
 
-### Required Software
-- **Docker & Docker Compose** (recommended for quick setup)
-- **Node.js** (v16 or higher) - for frontend development
-- **Python** (v3.8 or higher) - for backend development
-- **Redis** - for async task processing
-- **Git** - for version control
+## How the dataset was built
 
-### Required Accounts & Services
-- **AWS Account** - for S3 storage
-- **Hugging Face Account** - for ML model hosting
-- **Firebase Project** - for authentication and database
+There was no labelled dataset, so we built one during the hackathon ([`backend/core/ml_model_final/data_stuff/`](backend/core/ml_model_final/data_stuff/)):
 
-### Required API Keys
-- AWS Access Key ID & Secret Access Key
-- Hugging Face API Token
-- Firebase Service Account Key
+1. Took acacia polygons from Portugal's official land-use map **COS2018** (class 5.1.1.6) with GeoPandas.
+2. Cut square frames around them and pulled matching satellite imagery (Esri World Imagery): `get_images_acacias.py`.
+3. Rasterised the same polygons into 640×640 masks with rasterio: `get_masks_acacias.py`.
+4. Repeated on non-acacia land to get **negatives**: `get_images_not_acacias.py`, `get_masks_not_acacias.py`.
+5. Converted masks to YOLO polygon labels and [published the dataset](https://huggingface.co/datasets/duartepcruz/acacia_dataset): `convert_masks_to_YOLO.py`, `data_to_huggingface.py`.
 
-## Quick Start (Docker - Recommended)
+Training and export: [`backend/core/ml_model_final/ml_training/`](backend/core/ml_model_final/ml_training/) (`training.py`, `export.py`), plus the exploratory notebook in [`ML_training/`](ML_training/).
 
-The easiest way to run the project is using Docker Compose:
+## System
 
-```bash
-# Clone the repository
-git clone <repository-url>
-cd TheThreeMusketers
-
-# Set up environment variables
-./setup.sh
-# Edit backend/.env with your actual API keys and credentials
-
-# Start all services with Docker Compose
-./start_docker.sh
+```
+React app ──► FastAPI ──► S3 (images)
+                 │
+                 └─► Celery + Redis ──► YOLOv8n-seg (Hugging Face) ──► masks + scores ──► Firestore
 ```
 
-This will start:
-- **Frontend**: http://localhost:3000
-- **Backend API**: http://localhost:8000
-- **API Documentation**: http://localhost:8000/docs
-- **Redis**: localhost:6379
+Uploads are queued asynchronously, so large images never block the UI. The checkpoint is also exported to ONNX (13 MB) and runs fully client-side in the [demo](https://duartepcruz.com/work/invasive-species-mapping/), reproducing Ultralytics' prototype-mask decoding in the browser.
 
-## Manual Setup (Development)
+![Detection report in the web app](docs/photos/reports-page.png)
 
-If you prefer to run services manually for development:
+**My part:** the dataset pipeline, model training and the whole backend/inference service. My two teammates built the web app.
 
-### 1. Backend Setup
+## Next steps
+- Train the full planned 50 epochs (this checkpoint stopped at 15) and compare n/s model sizes.
+- Add flowering-season imagery to fix the main recall gap.
+- Report per-tile recall at several thresholds, not just the default 0.25.
+
+## Run it locally
+
+Requires Docker, plus an AWS account (S3), a Hugging Face token and a Firebase project.
 
 ```bash
+./setup.sh           # creates backend/.env, then fill in your credentials
+./start_docker.sh    # frontend :3000, API :8000 (docs at /docs), Redis :6379
+```
+
+<details><summary>Manual setup, environment variables and troubleshooting</summary>
+
+### Backend
+```bash
 cd backend
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-
-# Set up environment variables
-./setup.sh
-# Edit backend/.env with your actual credentials
-
-# Start Redis server (in separate terminal)
-redis-server
-
-# Start backend services
+redis-server &          # or: docker run -d -p 6379:6379 redis:7-alpine
 ./start_backend.sh
 ```
 
-### 2. Frontend Setup
-
+### Frontend
 ```bash
 cd frontend
-
-# Install dependencies
 npm install
-
-# Start development server
-npm start
+npm start               # http://localhost:3000
 ```
 
-The frontend will be available at http://localhost:3000
-
-### 3. Environment Configuration
-
-Create a `.env` file in the project root with the following variables:
-
-```env
-# AWS Configuration
-AWS_ACCESS_KEY_ID=your_aws_access_key
-AWS_SECRET_ACCESS_KEY=your_aws_secret_key
-AWS_S3_BUCKET=your_s3_bucket_name
-
-# Hugging Face Configuration
-HF_API_TOKEN=your_huggingface_token
-HF_MODEL_NAME=your-username/forest-guardian-yolov8-seg
-
-# Firebase Configuration
-FIREBASE_CREDENTIALS=junctionx-hackathon-firebase-adminsdk-fbsvc-b9ad2c64f0.json
-
-# Redis Configuration
+### Environment variables (`backend/.env`)
+```
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_S3_BUCKET=...
+HF_API_TOKEN=...
+HF_MODEL_NAME=duartepcruz/forest-guardian-yolov8-seg
+FIREBASE_CREDENTIALS=path/to/firebase-service-account.json
 REDIS_URL=redis://localhost:6379/0
 CELERY_BROKER_URL=redis://localhost:6379/0
 CELERY_RESULT_BACKEND=redis://localhost:6379/0
 ```
 
-## How to Run the Project
+### Troubleshooting
+- **Health check:** `http://localhost:8000/health`
+- **Redis connection error:** make sure `redis-server` is running.
+- **Firebase auth error:** check that `FIREBASE_CREDENTIALS` points to a valid service-account file.
+- **S3 upload failures:** check AWS credentials and bucket permissions.
+- **Model errors:** check the Hugging Face token and model name.
+- **Logs:** `docker-compose logs -f`
 
-### Option 1: Docker Compose (Easiest)
+</details>
 
-```bash
-# Start all services
-docker-compose up --build
-
-# Or use the provided script
-./start_docker.sh
-```
-
-### Option 2: Manual Development Setup
-
-1. **Start Redis**:
-   ```bash
-   redis-server
-   ```
-
-2. **Start Backend** (in backend directory):
-   ```bash
-   ./start_backend.sh
-   ```
-
-3. **Start Frontend** (in frontend directory):
-   ```bash
-   npm start
-   ```
-
-### Option 3: Production Build
-
-```bash
-# Build frontend
-cd frontend
-npm run build
-
-# Start backend in production mode
-cd backend
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-## Testing the Setup
-
-1. **Health Check**: Visit http://localhost:8000/health
-2. **API Documentation**: Visit http://localhost:8000/docs
-3. **Frontend**: Visit http://localhost:3000
-4. **Upload Test**: Use the web interface to upload an image and test the detection pipeline
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Redis Connection Error**:
-   ```bash
-   # Start Redis server
-   redis-server
-   
-   # Or with Docker
-   docker run -d -p 6379:6379 redis:7-alpine
-   ```
-
-2. **Firebase Authentication Error**:
-   - Ensure `FIREBASE_CREDENTIALS` file exists
-   - Check Firebase project configuration
-   - Verify service account permissions
-
-3. **S3 Upload Failures**:
-   - Verify AWS credentials in `.env`
-   - Check S3 bucket permissions
-   - Ensure bucket exists and is accessible
-
-4. **ML Model Errors**:
-   - Verify Hugging Face token
-   - Check model name and availability
-   - Ensure model is public or you have access
-
-5. **Port Already in Use**:
-   ```bash
-   # Kill processes using ports
-   lsof -ti:3000 | xargs kill -9  # Frontend
-   lsof -ti:8000 | xargs kill -9  # Backend
-   lsof -ti:6379 | xargs kill -9  # Redis
-   ```
-
-### Development Tips
-
-- Use `docker-compose logs -f` to view all service logs
-- Check `backend/logs/` for detailed error logs
-- Use browser developer tools to debug frontend issues
-- Test API endpoints with curl or Postman
-
-### Getting Help
-
-- Check the backend README for detailed API documentation
-- Review Docker Compose logs for service-specific errors
-- Ensure all environment variables are properly set
-
-## Project Structure
-
-```
-TheThreeMusketers/
-├── backend/                 # FastAPI backend
-│   ├── app/                # Main application code
-│   │   ├── controllers/    # API endpoints
-│   │   ├── middlewares/    # Authentication & middleware
-│   │   └── utils/          # Utility functions
-│   ├── core/               # Core functionality
-│   │   ├── ml_model/       # ML model training
-│   │   └── tasks/          # Celery background tasks
-│   ├── requirements.txt    # Python dependencies
-│   └── start_backend.sh    # Backend startup script
-├── frontend/               # React frontend
-│   ├── src/                # Source code
-│   │   ├── components/     # React components
-│   │   ├── pages/          # Page components
-│   │   └── services/       # API services
-│   ├── package.json        # Node.js dependencies
-│   └── Dockerfile.dev      # Development Dockerfile
-├── docker-compose.yml      # Docker services configuration
-├── setup.sh               # Environment setup script
-└── start_docker.sh        # Docker startup script
-```
-
-## Architecture Overview
-
-### Frontend:
-- React + Tailwind
-- React Query for async calls
-- Displays uploaded images and segmentation masks
-
-### Backend:
-- Python + FastAPI
-- Firebase Auth for authentication and Firebase Firestore for metadata (might be updated to PostgreSQL + SQLAlchemy)
-- AWS S3 for image storage
-- Celery + Redis for asynchronous processing
-
-### ML Model:
-- YOLOv8-seg (Ultralytics), fine-tuned on Acacia dataset
-- Hosted on Hugging Face
-- Backend communicates via Hugging Face API
-
-## Demo / Data Flow
-
-0. User authenticates via the frontend and the backend does the connection to Firebase Auth.
-1. User uploads an image via the frontend.
-2. Backend stores the image in S3 and records metadata in Firebase Firestore (might change to PostgreSQL + SQLAlchemy).
-3. Image is sent to YOLOv8-seg model hosted on Hugging Face.
-4. Model returns segmentation mask and confidence scores.
-5. Backend saves the results to S3.
-6. Frontend fetches results and displays segmented Acacia regions interactively.
-
-## ML Pipeline
-
-[Satellite / Drone / LiDAR Data] 
-       │
-       │  (preprocessing)
-       ▼
-+---------------------------+
-|   Data Alignment & Fusion |
-|   - Resample Sentinel-2  |
-|   - Process LiDAR/DEM    |
-|   - Combine spectral +   |
-|     structural channels  |
-+---------------------------+
-       │
-       │  (ML Inference)
-       ▼
-+---------------------------+
-|    YOLOv8-Seg Model       |
-|   - Input: preprocessed   |
-|     imagery               |
-|   - Output: segmentation  |
-|     masks & confidence    |
-+---------------------------+
-       │
-       │  (Postprocessing)
-       ▼
-+---------------------------+
-|  Geo-referenced Outputs   |
-|   - Masked imagery        |
-|   - Coverage stats        |
-|   - GeoJSON polygons      |
-+---------------------------+
-       │
-       │  (Temporal Tracking)
-       ▼
-+---------------------------+
-|   Time Series Analysis    |
-|   - Compare with past     |
-|     images                |
-|   - Detect spread/growth  |
-|   - Update prediction map |
-+---------------------------+
-       │
-       ▼
-[Frontend / Dashboard / Map Visualization]
-- Interactive maps (Leaflet / Mapbox)
-- Confidence overlays
-- User queries by date & region
-
-
-## Tech Stack
-
-- **Frontend:** React, Tailwind, React Query  
-- **Backend:** Python, FastAPI, Firebase Auth, Firebase Firestore (might change to PostgreSQL + SQLAlchemy), AWS S3, Celery + Redis for async tasks
-- **ML Model:** YOLOv8-seg (Ultralytics), Hugging Face API
-
-## Results
-- 1st Place General
-- 1st Place Peer Review
-- 2nd Place Partners Review
-- 3rd Place JunctionX Collaborators Review
-
-## Future Improvements:
-- Interactive map overlays with Leaflet or Mapbox
-- User history dashboard and analytics
-- Change Firebase Firestore to PostgreSQL + SQLAlchemy
-- Add future improvements here
-
-## License
-MIT License
+## Team
+"The Three Musketeers": Duarte Pereira da Cruz, Daniel and André. MIT License.
